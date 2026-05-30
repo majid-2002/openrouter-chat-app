@@ -1,0 +1,46 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Chat {
+  id        String    @id @default(cuid())
+  title     String
+  model     String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+}
+
+model Message {
+  id          String              @id @default(cuid())
+  chatId      String
+  role        String
+  content     String
+  createdAt   DateTime            @default(now())
+  chat        Chat                @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  attachments MessageAttachment[]
+
+  @@index([chatId, createdAt])
+}
+
+model MessageAttachment {
+  id        String   @id @default(cuid())
+  messageId String
+  name      String
+  mimeType  String
+  dataUrl   String
+  createdAt DateTime @default(now())
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+model AppSetting {
+  key   String @id
+  value String
+}
