@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
+type PrismaModule = typeof import("@prisma/client");
+
 type SqliteStatement = {
   all: (...values: unknown[]) => unknown[];
   get: (...values: unknown[]) => unknown;
@@ -12,11 +14,6 @@ type SqliteStatement = {
 type SqliteDatabase = {
   exec: (sql: string) => void;
   prepare: (sql: string) => SqliteStatement;
-};
-
-const loadNodeModule = createRequire(import.meta.url);
-const { DatabaseSync } = loadNodeModule("node:sqlite") as {
-  DatabaseSync: new (path: string) => SqliteDatabase;
 };
 
 type Chat = {
@@ -52,6 +49,10 @@ type ChatWithMessages = Chat & {
   messages: MessageWithAttachments[];
 };
 
+type ChatFindManyArgs = {
+  orderBy?: { updatedAt: "asc" | "desc" };
+};
+
 type ChatFindUniqueArgs = {
   where: { id: string };
   include?: {
@@ -75,9 +76,100 @@ type MessageCreateArgs = {
   };
 };
 
+type AppDatabase = {
+  chat: {
+    findMany: (args?: ChatFindManyArgs) => Promise<Chat[]>;
+    create: (args: { data: { title: string; model: string } }) => Promise<Chat>;
+    findUnique: (args: ChatFindUniqueArgs) => Promise<ChatWithMessages | null>;
+    update: (args: {
+      where: { id: string };
+      data: { title?: string; model?: string };
+    }) => Promise<Chat>;
+    delete: (args: { where: { id: string } }) => Promise<unknown>;
+  };
+  message: {
+    create: (args: MessageCreateArgs) => Promise<MessageWithAttachments>;
+  };
+};
+
 const globalForSqlite = globalThis as unknown as {
+  appDatabase?: AppDatabase;
   appDb?: SqliteDatabase;
 };
+
+function shouldUseSqliteAdapter() {
+  const databaseClient = process.env.DATABASE_CLIENT?.toLowerCase();
+
+  if (databaseClient === "sqlite" || databaseClient === "node:sqlite") {
+    return true;
+  }
+
+  if (databaseClient === "prisma") {
+    return false;
+  }
+
+  return (
+    process.platform === "android" ||
+    Boolean(process.env.PREFIX?.includes("/com.termux/"))
+  );
+}
+
+function loadSqliteDatabaseSync() {
+  const loadNodeModule = createRequire(import.meta.url);
+
+  try {
+    return (loadNodeModule("node:sqlite") as {
+      DatabaseSync: new (path: string) => SqliteDatabase;
+    }).DatabaseSync;
+  } catch (error) {
+    const details = error instanceof Error ? ` ${error.message}` : "";
+    throw new Error(
+      `The Android SQLite adapter requires a Node.js build with node:sqlite support.${details}`,
+    );
+  }
+}
+
+async function createPrismaClient() {
+  const { PrismaClient } = (await import("@prisma/client")) as PrismaModule;
+  return new PrismaClient() as unknown as AppDatabase;
+}
+
+async function getDatabaseClient() {
+  if (globalForSqlite.appDatabase) {
+    return globalForSqlite.appDatabase;
+  }
+
+  if (shouldUseSqliteAdapter()) {
+    globalForSqlite.appDatabase = sqliteAdapter;
+    return globalForSqlite.appDatabase;
+  }
+
+  try {
+    globalForSqlite.appDatabase = await createPrismaClient();
+    return globalForSqlite.appDatabase;
+  } catch (prismaError) {
+    try {
+      getDatabase();
+      globalForSqlite.appDatabase = sqliteAdapter;
+      return globalForSqlite.appDatabase;
+    } catch (sqliteError) {
+      const prismaMessage =
+        prismaError instanceof Error ? prismaError.message : String(prismaError);
+      const sqliteMessage =
+        sqliteError instanceof Error ? sqliteError.message : String(sqliteError);
+
+      throw new Error(
+        [
+          "Unable to initialize a database client.",
+          `Prisma Client failed: ${prismaMessage}`,
+          `SQLite adapter failed: ${sqliteMessage}`,
+          "On desktop, run `npx prisma generate` after installing dependencies.",
+          "On Android/Termux, use Node.js 24+ so node:sqlite is available.",
+        ].join(" "),
+      );
+    }
+  }
+}
 
 function getDatabasePath() {
   const databaseUrl = process.env.DATABASE_URL ?? "file:./prisma/dev.db";
@@ -98,6 +190,7 @@ function getDatabase() {
 
   const dbPath = getDatabasePath();
   mkdirSync(dirname(dbPath), { recursive: true });
+  const DatabaseSync = loadSqliteDatabaseSync();
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA foreign_keys = ON");
   ensureSchema(db);
@@ -137,6 +230,11 @@ function ensureSchema(db: SqliteDatabase) {
       CONSTRAINT "MessageAttachment_messageId_fkey"
         FOREIGN KEY ("messageId") REFERENCES "Message" ("id")
         ON DELETE CASCADE ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS "AppSetting" (
+      "key" TEXT NOT NULL PRIMARY KEY,
+      "value" TEXT NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS "Message_chatId_createdAt_idx"
@@ -220,26 +318,13 @@ function getAttachments(messageId: string, order: "asc" | "desc" = "asc") {
   return rows.map(rowToAttachment);
 }
 
-export const prisma: {
+const sqliteAdapter: AppDatabase = {
   chat: {
-    findMany: (args?: unknown) => Promise<Chat[]>;
-    create: (args: { data: { title: string; model: string } }) => Promise<Chat>;
-    findUnique: (args: ChatFindUniqueArgs) => Promise<ChatWithMessages | null>;
-    update: (args: {
-      where: { id: string };
-      data: { title?: string; model?: string };
-    }) => Promise<Chat>;
-    delete: (args: { where: { id: string } }) => Promise<null>;
-  };
-  message: {
-    create: (args: MessageCreateArgs) => Promise<MessageWithAttachments>;
-  };
-} = {
-  chat: {
-    async findMany() {
+    async findMany(args?: ChatFindManyArgs) {
       const db = getDatabase();
+      const order = args?.orderBy?.updatedAt === "asc" ? "ASC" : "DESC";
       const rows = db
-        .prepare(`SELECT * FROM "Chat" ORDER BY "updatedAt" DESC`)
+        .prepare(`SELECT * FROM "Chat" ORDER BY "updatedAt" ${order}`)
         .all() as Array<Record<string, unknown>>;
 
       return rows.map(rowToChat);
@@ -378,6 +463,36 @@ export const prisma: {
         ...rowToMessage(message),
         attachments: getAttachments(message.id),
       } satisfies MessageWithAttachments;
+    },
+  },
+};
+
+export const prisma: AppDatabase = {
+  chat: {
+    async findMany(args) {
+      return (await getDatabaseClient()).chat.findMany(args);
+    },
+
+    async create(args) {
+      return (await getDatabaseClient()).chat.create(args);
+    },
+
+    async findUnique(args) {
+      return (await getDatabaseClient()).chat.findUnique(args);
+    },
+
+    async update(args) {
+      return (await getDatabaseClient()).chat.update(args);
+    },
+
+    async delete(args) {
+      return (await getDatabaseClient()).chat.delete(args);
+    },
+  },
+
+  message: {
+    async create(args) {
+      return (await getDatabaseClient()).message.create(args);
     },
   },
 };
