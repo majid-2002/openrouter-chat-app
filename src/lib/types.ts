@@ -20,6 +20,7 @@ export type ChatMessage = {
   chatId: string;
   role: "user" | "assistant" | "system";
   content: string;
+  reasoning: string;
   createdAt: string;
   attachments: ChatAttachment[];
 };

@@ -29,6 +29,7 @@ type Message = {
   chatId: string;
   role: string;
   content: string;
+  reasoning: string;
   createdAt: Date;
 };
 
@@ -70,6 +71,7 @@ type MessageCreateArgs = {
     chatId: string;
     role: string;
     content: string;
+    reasoning?: string;
     attachments?: {
       create: Array<{ name: string; mimeType: string; dataUrl: string }>;
     };
@@ -135,12 +137,12 @@ async function createPrismaClient() {
 }
 
 async function getDatabaseClient() {
-  if (globalForSqlite.appDatabase) {
+  if (shouldUseSqliteAdapter()) {
+    globalForSqlite.appDatabase = sqliteAdapter;
     return globalForSqlite.appDatabase;
   }
 
-  if (shouldUseSqliteAdapter()) {
-    globalForSqlite.appDatabase = sqliteAdapter;
+  if (globalForSqlite.appDatabase) {
     return globalForSqlite.appDatabase;
   }
 
@@ -185,6 +187,7 @@ function getDatabasePath() {
 
 function getDatabase() {
   if (globalForSqlite.appDb) {
+    ensureSchema(globalForSqlite.appDb);
     return globalForSqlite.appDb;
   }
 
@@ -214,6 +217,7 @@ function ensureSchema(db: SqliteDatabase) {
       "chatId" TEXT NOT NULL,
       "role" TEXT NOT NULL,
       "content" TEXT NOT NULL,
+      "reasoning" TEXT NOT NULL DEFAULT '',
       "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT "Message_chatId_fkey"
         FOREIGN KEY ("chatId") REFERENCES "Chat" ("id")
@@ -243,6 +247,16 @@ function ensureSchema(db: SqliteDatabase) {
     CREATE INDEX IF NOT EXISTS "MessageAttachment_messageId_idx"
       ON "MessageAttachment"("messageId");
   `);
+
+  const messageColumns = db
+    .prepare(`PRAGMA table_info("Message")`)
+    .all() as Array<Record<string, unknown>>;
+
+  if (!messageColumns.some((column) => column.name === "reasoning")) {
+    db.exec(
+      `ALTER TABLE "Message" ADD COLUMN "reasoning" TEXT NOT NULL DEFAULT '';`,
+    );
+  }
 }
 
 function toDate(value: unknown) {
@@ -273,6 +287,7 @@ function rowToMessage(row: Record<string, unknown>): Message {
     chatId: String(row.chatId),
     role: String(row.role),
     content: String(row.content),
+    reasoning: String(row.reasoning ?? ""),
     createdAt: toDate(row.createdAt),
   };
 }
@@ -424,13 +439,14 @@ const sqliteAdapter: AppDatabase = {
       try {
         db.prepare(
           `INSERT INTO "Message"
-           ("id", "chatId", "role", "content", "createdAt")
-           VALUES (?, ?, ?, ?, ?)`,
+           ("id", "chatId", "role", "content", "reasoning", "createdAt")
+           VALUES (?, ?, ?, ?, ?, ?)`,
         ).run(
           message.id,
           message.chatId,
           message.role,
           message.content,
+          data.reasoning ?? "",
           message.createdAt,
         );
 

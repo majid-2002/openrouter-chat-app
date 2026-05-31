@@ -37,6 +37,23 @@ type OpenRouterCompletionParams = Omit<
   tools?: OpenRouterWebSearchTool[];
 };
 
+type OpenRouterReasoningDetail = {
+  type?: string;
+  text?: string;
+  summary?: string;
+};
+
+type OpenRouterDelta = {
+  content?: string | null;
+  reasoning?: string | null;
+  reasoning_content?: string | null;
+  reasoning_details?: OpenRouterReasoningDetail[] | null;
+};
+
+type StreamEvent =
+  | { type: "content"; text: string }
+  | { type: "reasoning"; text: string };
+
 export async function POST(request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
@@ -120,6 +137,7 @@ export async function POST(request: Request, context: RouteContext) {
       }),
       { role: "user", content: buildUserContent(content ?? "", attachments) },
     ];
+    const shouldCaptureReasoning = Boolean(body.think);
 
     const completionParams: OpenRouterCompletionParams = {
       model,
@@ -164,6 +182,14 @@ export async function POST(request: Request, context: RouteContext) {
 
     const encoder = new TextEncoder();
     let assistantContent = "";
+    let assistantReasoning = "";
+
+    function enqueueEvent(
+      controller: ReadableStreamDefaultController,
+      event: StreamEvent,
+    ) {
+      controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+    }
 
     const readable = new ReadableStream({
       async start(controller) {
@@ -173,21 +199,38 @@ export async function POST(request: Request, context: RouteContext) {
               break;
             }
 
-            const delta = chunk.choices[0]?.delta?.content ?? "";
-            if (!delta) {
-              continue;
+            const delta = chunk.choices[0]?.delta as OpenRouterDelta | undefined;
+            const reasoningDelta = shouldCaptureReasoning
+              ? extractReasoningDelta(delta)
+              : "";
+            if (reasoningDelta) {
+              assistantReasoning += reasoningDelta;
+              enqueueEvent(controller, {
+                type: "reasoning",
+                text: reasoningDelta,
+              });
             }
 
-            assistantContent += delta;
-            controller.enqueue(encoder.encode(delta));
+            const contentDelta = delta?.content ?? "";
+            if (contentDelta) {
+              assistantContent += contentDelta;
+              enqueueEvent(controller, {
+                type: "content",
+                text: contentDelta,
+              });
+            }
           }
 
-          if (!request.signal.aborted && assistantContent.trim()) {
+          if (
+            !request.signal.aborted &&
+            (assistantContent.trim() || assistantReasoning.trim())
+          ) {
             await prisma.message.create({
               data: {
                 chatId: chat.id,
                 role: "assistant",
                 content: assistantContent,
+                reasoning: assistantReasoning,
               },
             });
           }
@@ -209,7 +252,7 @@ export async function POST(request: Request, context: RouteContext) {
 
     return new Response(readable, {
       headers: {
-        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Type": "application/x-ndjson; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
         "X-User-Message-Id": userMessage.id,
       },
@@ -220,6 +263,24 @@ export async function POST(request: Request, context: RouteContext) {
 
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+function extractReasoningDelta(delta: OpenRouterDelta | undefined) {
+  if (!delta) {
+    return "";
+  }
+
+  if (delta.reasoning) {
+    return delta.reasoning;
+  }
+
+  if (delta.reasoning_content) {
+    return delta.reasoning_content;
+  }
+
+  return (delta.reasoning_details ?? [])
+    .map((detail) => detail.text ?? detail.summary ?? "")
+    .join("");
 }
 
 function makeTitle(content: string) {

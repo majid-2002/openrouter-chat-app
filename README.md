@@ -9,8 +9,10 @@ A local-first AI chat application built with Next.js, Prisma, SQLite, and OpenRo
 - OpenRouter model picker
 - Persistent chats with SQLite
 - Chat create, switch, rename, and delete
+- Unique chat URLs for reload and sharing
 - Image attachment support for vision-capable models
 - Optional Think mode for reasoning-capable models
+- Streaming Thinking panel when a model/provider exposes reasoning tokens
 - Optional OpenRouter web search per message
 - OpenRouter credit balance display
 - Markdown rendering with styled code blocks
@@ -81,6 +83,12 @@ Open:
 http://localhost:3000
 ```
 
+Each chat also has a stable path:
+
+```text
+http://localhost:3000/chats/{chat-id}
+```
+
 ## Scripts
 
 ```bash
@@ -102,5 +110,6 @@ The OpenRouter key is only used on the server through Next.js API routes. It is 
 
 - Image chat requires a vision-capable OpenRouter model.
 - Think mode requires a reasoning-capable OpenRouter model. Unsupported models may ignore it or return an upstream error.
+- Reasoning text is only shown when OpenRouter returns it for the selected model/provider.
 - Web search uses OpenRouter's server-side search tool and may add provider cost when enabled.
 - SQLite is local to this project. The generated database file is ignored by Git.

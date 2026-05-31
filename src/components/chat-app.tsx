@@ -31,6 +31,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import clsx from "clsx";
 import type {
   ChatDetail,
@@ -46,10 +47,160 @@ type ApiError = {
   error?: string;
 };
 
+type ChatStreamEvent =
+  | { type: "content"; text: string }
+  | { type: "reasoning"; text: string };
+
 type CodeComponentProps = {
   children?: React.ReactNode;
   className?: string;
 };
+
+type HighlightToken = {
+  className?: string;
+  text: string;
+};
+
+type TokenPattern = {
+  className: string;
+  pattern: RegExp;
+};
+
+const keywordGroups = {
+  bash: [
+    "case",
+    "do",
+    "done",
+    "elif",
+    "else",
+    "esac",
+    "fi",
+    "for",
+    "function",
+    "if",
+    "in",
+    "local",
+    "then",
+    "while",
+  ],
+  js: [
+    "async",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "else",
+    "export",
+    "extends",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "if",
+    "import",
+    "let",
+    "new",
+    "return",
+    "switch",
+    "throw",
+    "try",
+    "typeof",
+    "var",
+    "while",
+    "yield",
+  ],
+  py: [
+    "and",
+    "as",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "if",
+    "import",
+    "in",
+    "is",
+    "lambda",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield",
+  ],
+  ts: [
+    "abstract",
+    "as",
+    "async",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "if",
+    "implements",
+    "import",
+    "interface",
+    "let",
+    "namespace",
+    "new",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "return",
+    "switch",
+    "throw",
+    "try",
+    "type",
+    "typeof",
+    "var",
+    "while",
+    "yield",
+  ],
+} satisfies Record<string, string[]>;
+
+const syntaxTokenClasses = {
+  attr: "text-[#9cdcfe]",
+  boolean: "text-[#569cd6]",
+  comment: "text-[#6a9955]",
+  function: "text-[#dcdcaa]",
+  keyword: "text-[#c586c0]",
+  number: "text-[#b5cea8]",
+  operator: "text-[#d4d4d4]",
+  property: "text-[#9cdcfe]",
+  string: "text-[#ce9178]",
+  tag: "text-[#569cd6]",
+  variable: "text-[#4ec9b0]",
+} satisfies Record<string, string>;
 
 const promptSets = [
   [
@@ -81,7 +232,12 @@ const creditFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 4,
 });
 
-export function ChatApp() {
+type ChatAppProps = {
+  initialChatId?: string;
+};
+
+export function ChatApp({ initialChatId }: ChatAppProps) {
+  const router = useRouter();
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -103,12 +259,16 @@ export function ChatApp() {
   const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
   const [chatToDelete, setChatToDelete] = useState<ChatSummary | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const sendAbortControllerRef = useRef<AbortController | null>(null);
+  const shouldStickToBottomRef = useRef(true);
   const localIdRef = useRef(0);
   const didBootstrapRef = useRef(false);
+  const didLoadChatsRef = useRef(false);
 
   const activeChat = useMemo(
     () => chats.find((chat) => chat.id === activeChatId) ?? null,
@@ -155,10 +315,11 @@ export function ChatApp() {
     setActiveChatId(data.chat.id);
     setMessages([]);
     setSelectedModel(data.chat.model);
+    router.push(`/chats/${data.chat.id}`);
     return data.chat;
-  }, [selectedModel]);
+  }, [router, selectedModel]);
 
-  const openChat = useCallback(async (chatId: string) => {
+  const openChat = useCallback(async (chatId: string, updateUrl = true) => {
     setIsLoadingChat(true);
     setError(null);
 
@@ -173,12 +334,15 @@ export function ChatApp() {
       setActiveChatId(data.chat.id);
       setMessages(data.chat.messages);
       setSelectedModel(data.chat.model);
+      if (updateUrl) {
+        router.push(`/chats/${data.chat.id}`);
+      }
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
       setIsLoadingChat(false);
     }
-  }, []);
+  }, [router]);
 
   const loadModels = useCallback(async () => {
     try {
@@ -230,7 +394,9 @@ export function ChatApp() {
       const nextChats = data.chats ?? [];
       setChats(nextChats);
 
-      if (nextChats[0]) {
+      if (initialChatId && nextChats.some((chat) => chat.id === initialChatId)) {
+        await openChat(initialChatId, false);
+      } else if (nextChats[0]) {
         await openChat(nextChats[0].id);
       } else {
         const response = await fetch("/api/chats", {
@@ -248,11 +414,14 @@ export function ChatApp() {
         setActiveChatId(data.chat.id);
         setMessages([]);
         setSelectedModel(data.chat.model);
+        router.replace(`/chats/${data.chat.id}`);
       }
     } catch (err) {
       setError(getErrorMessage(err));
+    } finally {
+      didLoadChatsRef.current = true;
     }
-  }, [openChat]);
+  }, [initialChatId, openChat, router]);
 
   // Client-side bootstrapping is intentional here because the chat shell owns
   // model/chat loading and optimistic state.
@@ -269,8 +438,41 @@ export function ChatApp() {
   }, [loadChats, loadCredits, loadModels]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isSending]);
+    if (
+      !didLoadChatsRef.current ||
+      !initialChatId ||
+      initialChatId === activeChatId
+    ) {
+      return;
+    }
+
+    void openChat(initialChatId, false);
+  }, [activeChatId, initialChatId, openChat]);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    shouldStickToBottomRef.current = true;
+    setShowScrollToBottom(false);
+    bottomRef.current?.scrollIntoView({ behavior });
+  }, []);
+
+  const handleMessagesScroll = useCallback(() => {
+    const container = messagesScrollRef.current;
+    if (!container) {
+      return;
+    }
+
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    const isNearBottom = distanceFromBottom < 140;
+    shouldStickToBottomRef.current = isNearBottom;
+    setShowScrollToBottom(!isNearBottom);
+  }, []);
+
+  useEffect(() => {
+    if (shouldStickToBottomRef.current) {
+      scrollToBottom();
+    }
+  }, [messages, isSending, scrollToBottom]);
 
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
@@ -372,6 +574,7 @@ export function ChatApp() {
         chatId,
         role: "user",
         content,
+        reasoning: "",
         createdAt,
         attachments,
       };
@@ -381,6 +584,7 @@ export function ChatApp() {
         chatId,
         role: "assistant",
         content: "",
+        reasoning: "",
         createdAt,
         attachments: [],
       };
@@ -418,6 +622,7 @@ export function ChatApp() {
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
+      let pendingLine = "";
 
       while (true) {
         const { value, done } = await reader.read();
@@ -425,14 +630,18 @@ export function ChatApp() {
           break;
         }
 
-        const chunk = decoder.decode(value, { stream: true });
-        setMessages((current) =>
-          current.map((message) =>
-            message.id === assistantMessageId
-              ? { ...message, content: message.content + chunk }
-              : message,
-          ),
-        );
+        pendingLine += decoder.decode(value, { stream: true });
+        const lines = pendingLine.split("\n");
+        pendingLine = lines.pop() ?? "";
+
+        for (const line of lines) {
+          applyStreamEvent(line, assistantMessageId);
+        }
+      }
+
+      pendingLine += decoder.decode();
+      if (pendingLine.trim()) {
+        applyStreamEvent(pendingLine, assistantMessageId);
       }
 
       await refreshChatList(chatId);
@@ -457,6 +666,27 @@ export function ChatApp() {
       sendAbortControllerRef.current = null;
       setIsSending(false);
     }
+  }
+
+  function applyStreamEvent(line: string, assistantMessageId: string) {
+    const event = parseStreamEvent(line);
+    if (!event) {
+      return;
+    }
+
+    setMessages((current) =>
+      current.map((message) => {
+        if (message.id !== assistantMessageId) {
+          return message;
+        }
+
+        if (event.type === "reasoning") {
+          return { ...message, reasoning: message.reasoning + event.text };
+        }
+
+        return { ...message, content: message.content + event.text };
+      }),
+    );
   }
 
   async function refreshChatList(focusChatId: string) {
@@ -747,7 +977,7 @@ export function ChatApp() {
         />
       )}
 
-      <section className="flex h-dvh min-w-0 flex-1 flex-col overflow-hidden bg-[#0c0d0d]">
+      <section className="relative flex h-dvh min-w-0 flex-1 flex-col overflow-hidden bg-[#0c0d0d]">
         <header className="flex min-h-16 items-center gap-2 border-b border-[#1e1e1e] bg-[#0c0d0d]/95 px-3 py-3 sm:gap-3 sm:px-4">
           <button
             className="grid size-10 shrink-0 place-items-center rounded-lg text-[#b7b7b1] hover:bg-[#1d1d1d]"
@@ -835,7 +1065,11 @@ export function ChatApp() {
           </div>
         )}
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-5 sm:py-8">
+        <div
+          className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-5 sm:py-8"
+          onScroll={handleMessagesScroll}
+          ref={messagesScrollRef}
+        >
           <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col">
             {isLoadingChat ? (
               <div className="flex items-center gap-2 text-sm text-[#858585]">
@@ -916,6 +1150,17 @@ export function ChatApp() {
             <div ref={bottomRef} />
           </div>
         </div>
+
+        {showScrollToBottom && (
+          <button
+            className="absolute bottom-48 left-1/2 z-30 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[#343434] bg-[#181919]/95 px-3 py-2 text-xs font-medium text-[#d7d7d2] shadow-xl shadow-black/35 backdrop-blur transition hover:border-[#4a4a4a] hover:bg-[#202121] sm:bottom-56"
+            onClick={() => scrollToBottom()}
+            type="button"
+          >
+            <ChevronDown size={16} />
+            Bottom
+          </button>
+        )}
 
         <form className="px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-5 sm:pb-8" onSubmit={sendMessage}>
           <div className="mx-auto max-w-5xl rounded-2xl border border-[#2d2d2d] bg-[#181919] p-3 shadow-2xl shadow-black/30 sm:p-4">
@@ -1104,7 +1349,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
       <div className="min-w-0 max-w-[min(760px,100%)]">
         <div
           className={clsx(
-            "min-w-0 overflow-hidden rounded-md border px-3 py-3 text-sm leading-6 sm:px-4",
+            "min-w-0 overflow-hidden rounded-md border px-3 py-3 text-sm leading-6 [overflow-wrap:anywhere] sm:px-4",
             isUser
               ? "border-[#3a3a3a] bg-[#242525] text-[#f3f3f1]"
               : "border-[#262626] bg-[#141515] text-[#e6e6e1]",
@@ -1130,19 +1375,29 @@ function MessageBubble({ message }: { message: ChatMessage }) {
               )}
             </div>
           ) : (
-            <div className="prose prose-sm max-w-none break-words prose-invert prose-headings:text-[#f3f7f1] prose-a:text-[#d7d7d2] prose-strong:text-[#f3f7f1] prose-code:text-[#f0f0ec] prose-pre:m-0 prose-pre:bg-transparent prose-pre:p-0">
-              {message.content ? (
-                <ReactMarkdown
-                  components={{
-                    code: CodeBlock,
-                  }}
-                  remarkPlugins={[remarkGfm]}
-                >
-                  {message.content}
-                </ReactMarkdown>
-              ) : (
-                <span className="text-[#8ca194]">Thinking...</span>
+            <div className="space-y-3">
+              {message.reasoning.trim() && (
+                <ThinkingPanel
+                  defaultOpen={!message.content}
+                  reasoning={message.reasoning}
+                />
               )}
+              <div className="prose prose-sm max-w-none break-words prose-invert prose-headings:text-[#f3f7f1] prose-a:text-[#d7d7d2] prose-strong:text-[#f3f7f1] prose-code:text-[#f0f0ec] prose-pre:m-0 prose-pre:bg-transparent prose-pre:p-0 prose-table:block prose-table:max-w-full prose-table:overflow-x-auto">
+                {message.content ? (
+                  <ReactMarkdown
+                    components={{
+                      code: CodeBlock,
+                    }}
+                    remarkPlugins={[remarkGfm]}
+                  >
+                    {message.content}
+                  </ReactMarkdown>
+                ) : (
+                  <span className="text-[#8ca194]">
+                    {message.reasoning ? "Writing answer..." : "Thinking..."}
+                  </span>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -1176,10 +1431,41 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   );
 }
 
+function ThinkingPanel({
+  defaultOpen,
+  reasoning,
+}: {
+  defaultOpen: boolean;
+  reasoning: string;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  return (
+    <details
+      className="group rounded-md border border-[#2f322f] bg-[#101111]"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+      open={open}
+    >
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-[#aeb8ad] marker:hidden">
+        <Sparkles size={14} />
+        <span>Thinking</span>
+        <ChevronDown
+          className="ml-auto transition-transform group-open:rotate-180"
+          size={14}
+        />
+      </summary>
+      <div className="max-h-64 overflow-y-auto border-t border-[#242724] px-3 py-2 text-xs leading-5 text-[#a7aaa5]">
+        <p className="whitespace-pre-wrap break-words">{reasoning}</p>
+      </div>
+    </details>
+  );
+}
+
 function CodeBlock({ children, className }: CodeComponentProps) {
   const [copied, setCopied] = useState(false);
   const code = String(children ?? "").replace(/\n$/, "");
-  const language = className?.match(/language-(\w+)/)?.[1];
+  const language = className?.match(/language-([\w-]+)/)?.[1];
+  const isBlockCode = Boolean(className) || code.includes("\n");
 
   async function copyCode() {
     await copyToClipboard(code);
@@ -1187,7 +1473,7 @@ function CodeBlock({ children, className }: CodeComponentProps) {
     window.setTimeout(() => setCopied(false), 1200);
   }
 
-  if (!className) {
+  if (!isBlockCode) {
     return (
       <code className="rounded bg-[#242525] px-1.5 py-0.5 text-[#f0f0ec]">
         {children}
@@ -1199,7 +1485,7 @@ function CodeBlock({ children, className }: CodeComponentProps) {
     <div className="my-4 min-w-0 overflow-hidden rounded-lg border border-[#2f2f2f] bg-[#0d0e0e]">
       <div className="flex items-center justify-between border-b border-[#2a2a2a] bg-[#181919] px-3 py-2">
         <span className="min-w-0 truncate text-xs font-medium uppercase tracking-[0.12em] text-[#858585]">
-          {language ?? "code"}
+          {language ?? "text"}
         </span>
         <button
           className="ml-2 flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs text-[#a7a7a2] transition hover:bg-[#242525] hover:text-[#f3f3f1]"
@@ -1210,11 +1496,198 @@ function CodeBlock({ children, className }: CodeComponentProps) {
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre className="overflow-x-auto p-4 text-sm leading-6 text-[#f0f0ec]">
-        <code className={className}>{code}</code>
+      <pre className="overflow-x-auto p-4 text-sm leading-6 text-[#d4d4d4]">
+        <code className={className}>
+          {language ? renderHighlightedCode(code, language) : code}
+        </code>
       </pre>
     </div>
   );
+}
+
+function renderHighlightedCode(code: string, language?: string) {
+  return highlightCode(code, language).map((token, index) =>
+    token.className ? (
+      <span className={token.className} key={`${index}-${token.text}`}>
+        {token.text}
+      </span>
+    ) : (
+      token.text
+    ),
+  );
+}
+
+function highlightCode(code: string, language?: string): HighlightToken[] {
+  const normalizedLanguage = normalizeLanguage(language);
+
+  if (normalizedLanguage === "html") {
+    return tokenizeWithPatterns(code, [
+      { className: syntaxTokenClasses.comment, pattern: /<!--[\s\S]*?-->/g },
+      { className: syntaxTokenClasses.tag, pattern: /<\/?[A-Za-z][\w:-]*|\/?>/g },
+      { className: syntaxTokenClasses.attr, pattern: /\s[A-Za-z_:][\w:.-]*(?=\=)/g },
+      {
+        className: syntaxTokenClasses.string,
+        pattern: /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g,
+      },
+      { className: syntaxTokenClasses.operator, pattern: /=/g },
+    ]);
+  }
+
+  if (normalizedLanguage === "css") {
+    return tokenizeWithPatterns(code, [
+      { className: syntaxTokenClasses.comment, pattern: /\/\*[\s\S]*?\*\//g },
+      {
+        className: syntaxTokenClasses.string,
+        pattern: /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g,
+      },
+      {
+        className: syntaxTokenClasses.number,
+        pattern: /\b\d+(?:\.\d+)?(?:px|rem|em|vh|vw|%|s|ms)?\b/g,
+      },
+      {
+        className: syntaxTokenClasses.property,
+        pattern: /\b-?[A-Za-z][\w-]*(?=\s*:)/g,
+      },
+      { className: syntaxTokenClasses.keyword, pattern: /@[A-Za-z-]+/g },
+      {
+        className: syntaxTokenClasses.operator,
+        pattern: /[{}()[\].,;:+\-*/%=&|!<>?]+/g,
+      },
+    ]);
+  }
+
+  const keywordPattern = getKeywordPattern(normalizedLanguage);
+  const commentPattern =
+    normalizedLanguage === "py" || normalizedLanguage === "bash"
+      ? String.raw`#[^\n]*`
+      : String.raw`\/\*[\s\S]*?\*\/|\/\/[^\n]*`;
+  return tokenizeWithPatterns(code, [
+    { className: syntaxTokenClasses.comment, pattern: new RegExp(commentPattern, "g") },
+    {
+      className: syntaxTokenClasses.string,
+      pattern: /`(?:\\.|[^`\\])*`|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g,
+    },
+    { className: syntaxTokenClasses.number, pattern: /\b\d+(?:\.\d+)?\b/g },
+    {
+      className: syntaxTokenClasses.keyword,
+      pattern: new RegExp(String.raw`\b(?:${keywordPattern})\b`, "g"),
+    },
+    {
+      className: syntaxTokenClasses.boolean,
+      pattern: /\b(?:true|false|null|undefined|None|True|False)\b/g,
+    },
+    {
+      className: syntaxTokenClasses.function,
+      pattern: /\b[A-Za-z_$][\w$]*(?=\s*\()/g,
+    },
+    {
+      className: syntaxTokenClasses.variable,
+      pattern: /\$[A-Za-z_][\w]*|\$\{[^}]+\}/g,
+    },
+    {
+      className: syntaxTokenClasses.operator,
+      pattern: /[{}()[\].,;:+\-*/%=&|!<>?]+/g,
+    },
+  ]);
+}
+
+function tokenizeWithPatterns(
+  code: string,
+  tokenPatterns: TokenPattern[],
+): HighlightToken[] {
+  const tokens: HighlightToken[] = [];
+  let index = 0;
+
+  while (index < code.length) {
+    const matchedToken = findTokenAt(code, index, tokenPatterns);
+
+    if (matchedToken) {
+      tokens.push(matchedToken);
+      index += matchedToken.text.length;
+      continue;
+    }
+
+    const plainStart = index;
+    index += 1;
+
+    while (index < code.length && !findTokenAt(code, index, tokenPatterns)) {
+      index += 1;
+    }
+
+    tokens.push({ text: code.slice(plainStart, index) });
+  }
+
+  return tokens;
+}
+
+function findTokenAt(
+  code: string,
+  index: number,
+  tokenPatterns: TokenPattern[],
+): HighlightToken | null {
+  for (const tokenPattern of tokenPatterns) {
+    tokenPattern.pattern.lastIndex = index;
+    const match = tokenPattern.pattern.exec(code);
+
+    if (match?.index === index && match[0]) {
+      return {
+        className: tokenPattern.className,
+        text: match[0],
+      };
+    }
+  }
+
+  return null;
+}
+
+function getKeywordPattern(language: string) {
+  if (language === "json") {
+    return "nevermatch";
+  }
+
+  if (language === "py") {
+    return keywordGroups.py.join("|");
+  }
+
+  if (language === "bash") {
+    return keywordGroups.bash.join("|");
+  }
+
+  return (language === "ts" ? keywordGroups.ts : keywordGroups.js).join("|");
+}
+
+function normalizeLanguage(language?: string) {
+  const normalized = language?.toLowerCase() ?? "";
+
+  if (["bash", "sh", "shell", "zsh"].includes(normalized)) {
+    return "bash";
+  }
+
+  if (["css", "scss"].includes(normalized)) {
+    return "css";
+  }
+
+  if (["html", "xml", "svg", "tsx", "jsx"].includes(normalized)) {
+    return normalized === "tsx" || normalized === "jsx" ? "ts" : "html";
+  }
+
+  if (["js", "javascript", "mjs", "cjs"].includes(normalized)) {
+    return "js";
+  }
+
+  if (["json", "jsonc"].includes(normalized)) {
+    return "json";
+  }
+
+  if (["py", "python"].includes(normalized)) {
+    return "py";
+  }
+
+  if (["ts", "typescript"].includes(normalized)) {
+    return "ts";
+  }
+
+  return "js";
 }
 
 function readFileAsDataUrl(file: File) {
@@ -1246,6 +1719,23 @@ async function copyToClipboard(text: string) {
   textarea.select();
   document.execCommand("copy");
   document.body.removeChild(textarea);
+}
+
+function parseStreamEvent(line: string): ChatStreamEvent | null {
+  const trimmedLine = line.trim();
+  if (!trimmedLine) {
+    return null;
+  }
+
+  const event = JSON.parse(trimmedLine) as Partial<ChatStreamEvent>;
+  if (
+    (event.type === "content" || event.type === "reasoning") &&
+    typeof event.text === "string"
+  ) {
+    return event as ChatStreamEvent;
+  }
+
+  return null;
 }
 
 function getErrorMessage(error: unknown) {

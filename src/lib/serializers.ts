@@ -23,20 +23,25 @@ export function serializeAttachment(attachment: MessageAttachment) {
 }
 
 export function serializeMessage(
-  message: Message & { attachments?: MessageAttachment[] },
+  message: Message & { attachments?: MessageAttachment[]; reasoning?: string },
 ): ChatMessage {
   return {
     id: message.id,
     chatId: message.chatId,
     role: message.role as ChatMessage["role"],
     content: message.content,
+    reasoning: message.reasoning ?? "",
     createdAt: message.createdAt.toISOString(),
     attachments: message.attachments?.map(serializeAttachment) ?? [],
   };
 }
 
 export function serializeChatDetail(
-  chat: Chat & { messages: Array<Message & { attachments: MessageAttachment[] }> },
+  chat: Chat & {
+    messages: Array<
+      Message & { attachments: MessageAttachment[]; reasoning?: string }
+    >;
+  },
 ): ChatDetail {
   return {
     ...serializeChat(chat),
